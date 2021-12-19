@@ -7,8 +7,15 @@ use hyper_tls::HttpsConnector;
 use std::error::Error;
 use scraper::{Html, Selector, Node, ElementRef};
 
-fn parse_player_stats_table(table_elt: &ElementRef) {
-    let tbody_selector= Selector::parse("tbody").unwrap();
+fn selector(selector_str: &str) -> Selector {
+    Selector::parse(selector_str).unwrap()
+}
+
+fn parse_player_stats_table(html_doc: &Html, table_selector_str: &str) {
+    let table_selector = selector(table_selector_str);
+    let table_elt= html_doc.select(&table_selector).next().unwrap();
+
+    let tbody_selector= selector("tbody");
     let table_body = table_elt.select(&tbody_selector).next().unwrap();
 
     'rowlabel: for data_row in table_body.children() {
@@ -70,32 +77,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let s_prime = s.replace("\n<!--", "").replace("\n-->", "");
     let html_doc = Html::parse_document(&s_prime);
 
-    let offense_selector = Selector::parse("#player_offense").unwrap();
-    let defense_selector = Selector::parse("#player_defense").unwrap();
-    let returns_selector = Selector::parse("#returns").unwrap();
-    let kicking_selector = Selector::parse("#kicking").unwrap();
-    let passing_adv_selector = Selector::parse("#passing_advanced").unwrap();
-    let rushing_adv_selector = Selector::parse("#rushing_advanced").unwrap();
-    let receiving_adv_selector = Selector::parse("#receiving_advanced").unwrap();
-    let defense_adv_selector = Selector::parse("#defense_advanced").unwrap();
-
-    let offense_table = html_doc.select(&offense_selector).next().unwrap();
-    let defense_table = html_doc.select(&defense_selector).next().unwrap();
-    let returns_table = html_doc.select(&returns_selector).next().unwrap();
-    let kicking_table = html_doc.select(&kicking_selector).next().unwrap();
-    let passing_adv_table = html_doc.select(&passing_adv_selector).next().unwrap();
-    let rushing_adv_table = html_doc.select(&rushing_adv_selector).next().unwrap();
-    let receiving_adv_table = html_doc.select(&receiving_adv_selector).next().unwrap();
-    let defense_adv_table = html_doc.select(&defense_adv_selector).next().unwrap();
-
-    parse_player_stats_table(&offense_table);
-    parse_player_stats_table(&defense_table);
-    parse_player_stats_table(&returns_table);
-    parse_player_stats_table(&kicking_table);
-    parse_player_stats_table(&passing_adv_table);
-    parse_player_stats_table(&rushing_adv_table);
-    parse_player_stats_table(&receiving_adv_table);
-    parse_player_stats_table(&defense_adv_table);
+    let offense_selector = parse_player_stats_table(&html_doc, "#player_offense");
+    let defense_selector = parse_player_stats_table(&html_doc, "#player_defense");
+    let returns_selector = parse_player_stats_table(&html_doc, "#returns");
+    let kicking_selector = parse_player_stats_table(&html_doc, "#kicking");
+    let passing_adv_selector = parse_player_stats_table(&html_doc, "#passing_advanced");
+    let rushing_adv_selector = parse_player_stats_table(&html_doc, "#rushing_advanced");
+    let receiving_adv_selector = parse_player_stats_table(&html_doc, "#receiving_advanced");
+    let defense_adv_selector = parse_player_stats_table(&html_doc, "#defense_advanced");
 
     Ok(())
 }
