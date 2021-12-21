@@ -7,11 +7,12 @@ use hyper::{
 use hyper_tls::HttpsConnector;
 use std::{error::Error, collections::HashMap};
 use scraper::{Html, Selector, Node, ElementRef};
-use regex::Regex;
+use regex::{Regex, Captures};
 use lazy_static::lazy_static;
 
 lazy_static!{
     static ref GAME_ID_REGEX: Regex = Regex::new(r".*/(\w+)\.htm").unwrap();
+    static ref WEEK_NUM_REGEX: Regex = Regex::new(r".*/(\d{4})/week_(\d)+\.htm").unwrap();
 }
 const PFR_DOMAIN: &'static str = "https://www.pro-football-reference.com";
 
@@ -28,8 +29,27 @@ struct GameStats<'a> {
     player_stats: Vec<PlayerGameStats<'a>>
 }
 
+#[derive(Debug)]
+struct GameInfo<'a> {
+    year: u32,
+    week_num: u32,
+    stats: GameStats<'a>
+}
+
 fn selector(selector_str: &str) -> Selector {
     Selector::parse(selector_str).unwrap()
+}
+
+fn parse_a_href(elt_ref: ElementRef) -> Uri {
+    elt_ref.value()
+        .attr("href")
+        .and_then(|link| {
+            if link.starts_with("/") {
+                format!("{}{}", PFR_DOMAIN, link).parse().ok()
+            } else {
+                link.parse().ok()
+            }
+        }).unwrap()
 }
 
 fn parse_player_stats_table<'a>(uri: &Uri, html_doc: &'a Html, table_selector_str: &str) -> Result<Vec<PlayerGameStats<'a>>, String> {
@@ -138,18 +158,28 @@ fn parse_game_log<'a>(game_log_uri: &Uri, game_log_html: &'a Html) -> Result<Gam
 }
 
 fn parse_season_week_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
-    season_week_log_html.select(&selector(".gamelink a"))
-        .map(|gamelink_elt| {
-            let gamelink = gamelink_elt.value().attr("href").unwrap();
-            let uri: Uri = if gamelink.starts_with("/") {
-                format!("{}{}", PFR_DOMAIN, gamelink).parse().unwrap()
-            } else {
-                gamelink.parse().unwrap()
-            };
-
-            uri
-        }).collect()
+    season_week_log_html
+        .select(&selector(".gamelink a"))
+        .map(parse_a_href)
+        .collect()
 }
+
+fn parse_season_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
+    season_week_log_html
+        .select(&selector("#div_week_games a"))
+        .filter(|elt_ref| {
+            let text_opt = elt_ref
+                .first_child()
+                .map(|noderef| match noderef.value() {
+                    Node::Text(t) => t.starts_with("Week"),
+                    _ => false
+                });
+
+            text_opt.unwrap_or(false)
+        }).map(parse_a_href)
+        .collect()
+}
+
 
 async fn fetch_uri(client: &Client<HttpsConnector<HttpConnector>>, uri: Uri) -> Result<String, Box<dyn Error + Send + Sync>>  {
     let mut resp = client.get(uri).await?;
@@ -165,23 +195,30 @@ async fn fetch_uri(client: &Client<HttpsConnector<HttpConnector>>, uri: Uri) -> 
     Ok(s)
 }
 
+fn parse_u8_capture(capture: &Captures, i: usize) -> Option<u32> {
+    capture.get(i)
+        .map(|m| m.as_str())
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
 
-    // let uri: Uri = "https://www.pro-football-reference.com/boxscores/202111280nyg.htm".parse()?;
-    // let game_log_html_str: String = fetch_uri(&client, uri).await?;
+    let season_uri: Uri = "https://www.pro-football-reference.com/years/2019/".parse().unwrap();
+    let season_page_str = fetch_uri(&client, season_uri).await?.replace("\n<!--", "").replace("\n-->", "");
 
-    // // TODO a lot of the stats tables below are commented!
-    // // find a better way to uncomment them
-    // let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
-    // let html_doc = Html::parse_document(&s_prime);
+    let season_page_html = Html::parse_document(&season_page_str);
+    let week_uris = parse_season_page(&season_page_html);
 
-    // let game_stats = parse_game_log(&html_doc);
-    // println!("{:?}", game_stats);
+    let week_uri_str = "https://www.pro-football-reference.com/years/1990/week_1.htm";
+    let week_uri: Uri = week_uri_str.parse().unwrap();
 
-    let week_uri: Uri = "https://www.pro-football-reference.com/years/1990/week_1.htm".parse().unwrap();
+    println!("{:?}", WEEK_NUM_REGEX.captures(week_uri_str));
+    let year = WEEK_NUM_REGEX.captures(week_uri_str).and_then(|c| parse_u8_capture(&c, 1)).unwrap();
+    let week_num = WEEK_NUM_REGEX.captures(week_uri_str).and_then(|c| parse_u8_capture(&c, 2)).unwrap();
+
     let week_page_str = fetch_uri(&client, week_uri).await?;
     let html_doc = Html::parse_document(&week_page_str);
 
@@ -199,14 +236,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             Html::parse_document(&s_prime)
         }).collect();
 
-    let game_log_stats: Vec<GameStats> = game_log_links
+    let game_infos: Vec<GameInfo> = game_log_links
         .iter()
         .zip(game_log_htmls.iter())
         .map(|(game_log_uri, game_log_html)|
-            parse_game_log(game_log_uri, &game_log_html).unwrap()
+            parse_game_log(game_log_uri, &game_log_html)
+                .map(|game_stats| GameInfo { year, week_num, stats: game_stats })
+                .unwrap()
         ).collect();
 
-    println!("{:?}", game_log_stats);
+    println!("{:?}", game_infos);
 
     Ok(())
 }
