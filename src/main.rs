@@ -1,7 +1,8 @@
+use futures::future::join_all;
 use hyper::{
     http::Uri,
     body::{to_bytes},
-    Client
+    Client, client::HttpConnector
 };
 use hyper_tls::HttpsConnector;
 use std::{error::Error, collections::HashMap};
@@ -12,6 +13,7 @@ use lazy_static::lazy_static;
 lazy_static!{
     static ref GAME_ID_REGEX: Regex = Regex::new(r".*/(\w+)\.htm").unwrap();
 }
+const PFR_DOMAIN: &'static str = "https://www.pro-football-reference.com";
 
 #[derive(Debug)]
 struct PlayerGameStats<'a> {
@@ -30,9 +32,12 @@ fn selector(selector_str: &str) -> Selector {
     Selector::parse(selector_str).unwrap()
 }
 
-fn parse_player_stats_table<'a>(html_doc: &'a Html, table_selector_str: &str) -> Vec<PlayerGameStats<'a>> {
+fn parse_player_stats_table<'a>(uri: &Uri, html_doc: &'a Html, table_selector_str: &str) -> Result<Vec<PlayerGameStats<'a>>, String> {
     let table_selector = selector(table_selector_str);
-    let table_elt= html_doc.select(&table_selector).next().unwrap();
+    let table_elt = match html_doc.select(&table_selector).next() {
+        Some(elt) => elt,
+        None => return Err(format!("Game log at {}: no table element for selector '{}' found", uri, table_selector_str))
+    };
 
     let tbody_selector= selector("tbody");
     let table_body = table_elt.select(&tbody_selector).next().unwrap();
@@ -98,34 +103,55 @@ fn parse_player_stats_table<'a>(html_doc: &'a Html, table_selector_str: &str) ->
         }
     }
 
-    retlist
+    Ok(retlist)
 }
 
-fn parse_game_log<'a>(game_log_html: &'a Html) -> GameStats<'a> {
+fn parse_game_log<'a>(game_log_uri: &Uri, game_log_html: &'a Html) -> Result<GameStats<'a>, String> {
     let mut player_stats: Vec<PlayerGameStats> = vec![];
 
     let game_link_selector = selector("link[rel=canonical]");
     let game_link = game_log_html.select(&game_link_selector).next().unwrap().value().attr("href").unwrap();
     let game_id = GAME_ID_REGEX.captures(game_link).unwrap().get(1).unwrap().as_str();
 
-    player_stats.extend(parse_player_stats_table(game_log_html, "#player_offense"));
-    player_stats.extend(parse_player_stats_table(game_log_html, "#player_defense"));
-    player_stats.extend(parse_player_stats_table(game_log_html, "#returns"));
-    player_stats.extend(parse_player_stats_table(game_log_html, "#kicking"));
-    player_stats.extend(parse_player_stats_table(game_log_html, "#passing_advanced"));
-    player_stats.extend(parse_player_stats_table(game_log_html, "#rushing_advanced"));
-    player_stats.extend(parse_player_stats_table(game_log_html, "#receiving_advanced"));
-    player_stats.extend(parse_player_stats_table(game_log_html, "#defense_advanced"));
+    // Mandatory stats.
+    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#player_offense")?);
+    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#player_defense")?);
+    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#returns")?);
+    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#kicking")?);
 
-    GameStats { game_id, player_stats }
+    // Optional advanced stats.
+    let adv_passing = parse_player_stats_table(game_log_uri, game_log_html, "#passing_advanced");
+    let adv_rushing = parse_player_stats_table(game_log_uri, game_log_html, "#rushing_advanced");
+    let adv_receiving = parse_player_stats_table(game_log_uri, game_log_html, "#receiving_advanced");
+    let adv_def = parse_player_stats_table(game_log_uri, game_log_html, "#defense_advanced");
+
+    for adv_stats in [adv_passing, adv_rushing, adv_receiving, adv_def] {
+        match adv_stats {
+            Ok(stats) => {
+                player_stats.extend(stats);
+            }
+            Err(_) => ()
+        }
+    }
+
+    Ok(GameStats { game_id, player_stats })
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let https = HttpsConnector::new();
-    let client = Client::builder().build::<_, hyper::Body>(https);
-    let uri: Uri = "https://www.pro-football-reference.com/boxscores/202111280nyg.htm".parse()?;
+fn parse_season_week_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
+    season_week_log_html.select(&selector(".gamelink a"))
+        .map(|gamelink_elt| {
+            let gamelink = gamelink_elt.value().attr("href").unwrap();
+            let uri: Uri = if gamelink.starts_with("/") {
+                format!("{}{}", PFR_DOMAIN, gamelink).parse().unwrap()
+            } else {
+                gamelink.parse().unwrap()
+            };
 
+            uri
+        }).collect()
+}
+
+async fn fetch_uri(client: &Client<HttpsConnector<HttpConnector>>, uri: Uri) -> Result<String, Box<dyn Error + Send + Sync>>  {
     let mut resp = client.get(uri).await?;
     // println!("Resp status: {}", resp.status());
 
@@ -134,14 +160,53 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // `file` claims the bytes are actually ISO-8859-1.
     // TODO find a valid way to convert to text
     let bytes = to_bytes(body).await.unwrap();
-    let game_log_html_str: String = bytes.iter().map(|&c| c as char).collect();
-    // TODO a lot of the stats tables below are commented!
-    // find a better way to uncomment them
-    let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
-    let html_doc = Html::parse_document(&s_prime);
+    let s: String = bytes.iter().map(|&c| c as char).collect();
 
-    let game_stats = parse_game_log(&html_doc);
-    println!("{:?}", game_stats);
+    Ok(s)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+
+    // let uri: Uri = "https://www.pro-football-reference.com/boxscores/202111280nyg.htm".parse()?;
+    // let game_log_html_str: String = fetch_uri(&client, uri).await?;
+
+    // // TODO a lot of the stats tables below are commented!
+    // // find a better way to uncomment them
+    // let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
+    // let html_doc = Html::parse_document(&s_prime);
+
+    // let game_stats = parse_game_log(&html_doc);
+    // println!("{:?}", game_stats);
+
+    let week_uri: Uri = "https://www.pro-football-reference.com/years/1990/week_1.htm".parse().unwrap();
+    let week_page_str = fetch_uri(&client, week_uri).await?;
+    let html_doc = Html::parse_document(&week_page_str);
+
+    let game_log_links = parse_season_week_page(&html_doc);
+    let game_logs = join_all(game_log_links.iter().map(|uri| fetch_uri(&client, uri.clone()))).await;
+
+    let game_log_htmls: Vec<Html> = game_logs
+        .into_iter()
+        .map(|game_log_res| {
+            let game_log_html_str = game_log_res.unwrap();
+
+            // TODO a lot of the stats tables below are commented!
+            // find a better way to uncomment them
+            let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
+            Html::parse_document(&s_prime)
+        }).collect();
+
+    let game_log_stats: Vec<GameStats> = game_log_links
+        .iter()
+        .zip(game_log_htmls.iter())
+        .map(|(game_log_uri, game_log_html)|
+            parse_game_log(game_log_uri, &game_log_html).unwrap()
+        ).collect();
+
+    println!("{:?}", game_log_stats);
 
     Ok(())
 }
