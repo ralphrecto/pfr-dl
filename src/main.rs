@@ -212,40 +212,40 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let season_page_html = Html::parse_document(&season_page_str);
     let week_uris = parse_season_page(&season_page_html);
 
-    let week_uri_str = "https://www.pro-football-reference.com/years/1990/week_1.htm";
-    let week_uri: Uri = week_uri_str.parse().unwrap();
+    for week_uri in &week_uris[..2] {
+        println!("Processing uri {}", week_uri);
 
-    println!("{:?}", WEEK_NUM_REGEX.captures(week_uri_str));
-    let year = WEEK_NUM_REGEX.captures(week_uri_str).and_then(|c| parse_u8_capture(&c, 1)).unwrap();
-    let week_num = WEEK_NUM_REGEX.captures(week_uri_str).and_then(|c| parse_u8_capture(&c, 2)).unwrap();
+        let week_uri_str = week_uri.to_string();
 
-    let week_page_str = fetch_uri(&client, week_uri).await?;
-    let html_doc = Html::parse_document(&week_page_str);
+        let year = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u8_capture(&c, 1)).unwrap();
+        let week_num = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u8_capture(&c, 2)).unwrap();
 
-    let game_log_links = parse_season_week_page(&html_doc);
-    let game_logs = join_all(game_log_links.iter().map(|uri| fetch_uri(&client, uri.clone()))).await;
+        let week_page_str = fetch_uri(&client, week_uri.clone()).await?;
+        let html_doc = Html::parse_document(&week_page_str);
 
-    let game_log_htmls: Vec<Html> = game_logs
-        .into_iter()
-        .map(|game_log_res| {
-            let game_log_html_str = game_log_res.unwrap();
+        let game_log_links = parse_season_week_page(&html_doc);
+        let game_logs = join_all(game_log_links.iter().map(|uri| fetch_uri(&client, uri.clone()))).await;
 
-            // TODO a lot of the stats tables below are commented!
-            // find a better way to uncomment them
-            let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
-            Html::parse_document(&s_prime)
-        }).collect();
+        let game_log_htmls: Vec<Html> = game_logs
+            .into_iter()
+            .map(|game_log_res| {
+                let game_log_html_str = game_log_res.unwrap();
 
-    let game_infos: Vec<GameInfo> = game_log_links
-        .iter()
-        .zip(game_log_htmls.iter())
-        .map(|(game_log_uri, game_log_html)|
-            parse_game_log(game_log_uri, &game_log_html)
-                .map(|game_stats| GameInfo { year, week_num, stats: game_stats })
-                .unwrap()
-        ).collect();
+                // TODO a lot of the stats tables below are commented!
+                // find a better way to uncomment them
+                let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
+                Html::parse_document(&s_prime)
+            }).collect();
 
-    println!("{:?}", game_infos);
+        let game_infos: Vec<GameInfo> = game_log_links
+            .iter()
+            .zip(game_log_htmls.iter())
+            .map(|(game_log_uri, game_log_html)|
+                parse_game_log( game_log_uri, &game_log_html)
+                    .map(|game_stats| GameInfo { year, week_num, stats: game_stats })
+                    .unwrap()
+            ).collect();
+    }
 
     Ok(())
 }
