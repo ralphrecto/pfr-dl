@@ -5,10 +5,11 @@ use hyper::{
     Client, client::HttpConnector
 };
 use hyper_tls::HttpsConnector;
+use structopt::StructOpt;
 use tokio::fs::create_dir_all;
 use tokio::fs::File;
 use tokio::io::AsyncWrite;
-use std::{error::Error, collections::{HashMap, HashSet, BTreeMap}, time::Duration, fmt};
+use std::{error::Error, collections::{HashMap, HashSet, BTreeMap}, time::Duration, fmt, path::PathBuf};
 use scraper::{Html, Selector, Node, ElementRef};
 use regex::{Regex, Captures};
 use lazy_static::lazy_static;
@@ -353,22 +354,41 @@ async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: 
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let https = HttpsConnector::new();
-    let client = Client::builder().build::<_, hyper::Body>(https);
+async fn process_year(client: &Client<HttpsConnector<HttpConnector>>, year: u32, output_dir: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    println!("Fetching data for {}", year);
 
-    let season_uri: Uri = "https://www.pro-football-reference.com/years/2021/".parse().unwrap();
+    let season_uri: Uri = format!("https://www.pro-football-reference.com/years/{}/", year).parse().unwrap();
     let season_page_str = fetch_uri(&client, season_uri).await?.replace("\n<!--", "").replace("\n-->", "");
 
     let season_page_html = Html::parse_document(&season_page_str);
     let week_uris = parse_season_page(&season_page_html);
-    let base_output_dir = "output";
 
-    let process_week_futures = week_uris.iter().map(|week_uri| process_week(&client, week_uri, base_output_dir));
+    let process_week_futures = week_uris.iter().map(|week_uri| process_week(&client, week_uri, &output_dir));
     let processed_weeks_res: Result<(), Box<dyn Error + Send + Sync>> = join_all(process_week_futures).await.into_iter().collect();
 
     processed_weeks_res?;
 
     Ok(())
+}
+
+#[derive(Debug, StructOpt)]
+struct Opts {
+    /// Year to download game level stats for.
+    #[structopt(short, long)]
+    year: u32,
+
+    /// Output directory to write data files to.
+    // TODO use Path or PathBuf?
+    #[structopt(short, long, default_value = "output")]
+    output_dir: String
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let Opts { year, output_dir } = Opts::from_args();
+
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+
+    process_year(&client, year, &output_dir).await
 }

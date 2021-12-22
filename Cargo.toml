@@ -14,3 +14,4 @@ regex = "1"
 lazy_static = "1"
 futures = "0.3"
 csv-async = { version = "1", features = ["tokio"] }
+structopt = "0.3"
