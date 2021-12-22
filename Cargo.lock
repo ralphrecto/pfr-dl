@@ -717,6 +717,7 @@ dependencies = [
 name = "pfr-dl"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "csv-async",
  "futures",
  "hyper",

@@ -1,3 +1,4 @@
+use clap::arg_enum;
 use futures::future::join_all;
 use hyper::{
     http::Uri,
@@ -18,6 +19,9 @@ use csv_async::AsyncWriter;
 lazy_static!{
     static ref GAME_ID_REGEX: Regex = Regex::new(r".*/(\w+)\.htm").unwrap();
     static ref WEEK_NUM_REGEX: Regex = Regex::new(r".*/(\d{4})/week_(\d{1,2})\.htm").unwrap();
+    static ref PLAYER_YEARS_REGEX: Regex = Regex::new(r"(\d{4})\-(\d{4})").unwrap();
+    static ref PLAYER_POS_REGEX: Regex = Regex::new(r"\((.*)\)").unwrap();
+    static ref PLAYER_ID_REGEX: Regex = Regex::new(r".*/(.+)\.htm").unwrap();
 }
 const PFR_DOMAIN: &str = "https://www.pro-football-reference.com";
 
@@ -359,11 +363,141 @@ async fn process_year(client: &Client<HttpsConnector<HttpConnector>>, year: u32,
     Ok(())
 }
 
+async fn process_players(client: &Client<HttpsConnector<HttpConnector>>, output_dir: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    println!("Processing player roster");
+
+    let players_uri: Uri = "https://www.pro-football-reference.com/players/".parse().unwrap();
+    let players_page_str = fetch_uri(client, players_uri).await?;
+    let players_page_html = Html::parse_document(&players_page_str);
+
+    let letter_links: Vec<Uri> = players_page_html
+        .select(&selector("ul.page_index li>a"))
+        .map(parse_a_href)
+        .collect();
+
+    let players_f = File::create(format!("{}/players", output_dir)).await?;
+    let mut csv_writer = AsyncWriter::from_writer(players_f);
+    csv_writer.write_record([
+        "player_id",
+        "player_name",
+        "positions",
+        "begin_year",
+        "end_year"
+    ]).await?;
+
+    for letter_link in letter_links {
+        println!("Downloading player data from {}", letter_link);
+
+        let letter_page_str = fetch_uri(client, letter_link).await?;
+        let letter_page = Html::parse_document(&letter_page_str);
+
+        let player_texts_selector = selector("#div_players p");
+        let player_texts = letter_page.select(&player_texts_selector);
+        for player_text in player_texts {
+            let mut player_vals: Vec<&str> = vec![];
+            let mut is_active = false;
+            for child in player_text.children() {
+                match child.value() {
+                    Node::Element(elt) => {
+                        let is_bolded = elt.attr("href").is_none();
+                        is_active = is_bolded;
+
+                        let anchor_node = if !is_bolded {
+                            child
+                        } else {
+                            child.first_child().unwrap()
+                        };
+
+                        let player_name = match anchor_node.first_child().unwrap().value() {
+                            Node::Text(player_name_text) => player_name_text.as_ref(),
+                            _ => ""
+                        }.trim();
+
+                        let player_id = match anchor_node.value().as_element().unwrap().attr("href") {
+                            Some(href) => 
+                                PLAYER_ID_REGEX.captures(href)
+                                .and_then(|captures| captures.get(1))
+                                .unwrap()
+                                .as_str(),
+                            None => continue
+                        };
+
+                        player_vals.push(player_id);
+                        player_vals.push(player_name);
+
+                        if is_bolded {
+                            let position = child.first_child()
+                                .and_then(|c| c.next_sibling())
+                                .and_then(|position_node| match position_node.value() {
+                                    Node::Text(pos_text) => PLAYER_POS_REGEX.captures(pos_text.as_ref()),
+                                    _ => None
+                                }).and_then(|captures| captures.get(1))
+                                .map(|m| m.as_str())
+                                .unwrap()
+                                .trim();
+
+                            player_vals.push(position);
+                        }
+                    },
+                    Node::Text(desc_text) => {
+                        let desc: &str = desc_text.as_ref();
+
+                        // Need to parse position out still.
+                        let position_opt = PLAYER_POS_REGEX.captures(desc)
+                            .and_then(|captures| captures.get(1))
+                            .map(|m| m.as_str());
+
+                        if let Some(position) = position_opt {
+                            player_vals.push(position);
+                        }
+                            
+                        let captures = PLAYER_YEARS_REGEX.captures(desc_text.as_ref()).unwrap();
+
+                        let begin_year = captures.get(1).unwrap().as_str().trim();
+                        let end_year = if is_active {
+                            ""
+                        } else {
+                            captures.get(2).unwrap().as_str().trim()
+                        };
+
+                        player_vals.push(begin_year);
+                        player_vals.push(end_year);
+                    },
+                    _ =>  ()
+                }
+            }
+
+            csv_writer.write_record(player_vals).await?;
+        }
+    }
+
+    Ok(())
+}
+
+arg_enum! {
+    #[derive(Debug)]
+    enum Mode {
+        Player,
+        Game
+    }
+}
+
 #[derive(Debug, StructOpt)]
 struct Opts {
+
+    /// Whether to download player roster or game data.
+    #[structopt(
+        short,
+        long,
+        possible_values = &Mode::variants(),
+        case_insensitive = true,
+        default_value = "game"
+    )]
+    mode: Mode,
+
     /// Year to download game level stats for.
-    #[structopt(short, long)]
-    year: u32,
+    #[structopt(short, long, required_if("mode", "game"))]
+    year: Option<u32>,
 
     /// Output directory to write data files to.
     // TODO use Path or PathBuf?
@@ -373,10 +507,17 @@ struct Opts {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let Opts { year, output_dir } = Opts::from_args();
+    let Opts { mode, year, output_dir } = Opts::from_args();
 
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
 
-    process_year(&client, year, &output_dir).await
+    match mode {
+        Mode::Player => {
+            process_players(&client, &output_dir).await
+        }
+        Mode::Game => {
+            process_year(&client, year.unwrap(), &output_dir).await
+        }
+    }
 }

@@ -1,8 +1,9 @@
 # pfr-dl
 
-Scraper for pro-football-reference.com player stats. This tool can currently download, parse, and write CSVs of game-level data.
+Scraper for pro-football-reference.com player stats. This tool can currently download, parse, and write CSVs of game-level data and historical player lists.
 
 # Usage
+## Game data
 The following invocation will write CSV files with 2000 data to the `output` directory.
 
 ```pfr-dl --year 2000 --output-dir output```
@@ -32,3 +33,8 @@ If you want to download multiple years at once, you can use this snippet:
 ```echo {2015..2020} | xargs -n 1 pfr-dl --output-dir output --year```
 
 Just be careful of potentially getting rate limited :)
+
+## Historical player data
+The following command will download a list of all historical players (including their positions and active years) to a `players` file in the output dir.
+
+```pfr-dl --mode player```
