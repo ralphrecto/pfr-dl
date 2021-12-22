@@ -1,11 +1,11 @@
-# pfr-api
+# pfr-dl
 
 Scraper for pro-football-reference.com player stats. This tool can currently download, parse, and write CSVs of game-level data.
 
 # Usage
 The following invocation will write CSV files with 2000 data to the `output` directory.
 
-```pfr-api --year 2000 --output-dir output```
+```pfr-dl --year 2000 --output-dir output```
 
 After invocation, `output` will look like the following on the file system:
 
@@ -29,6 +29,6 @@ Within the output directory, there will be a directory for the year. Within a ye
 
 If you want to download multiple years at once, you can use this snippet:
 
-```echo {2015..2020} | xargs -n 1 pfr-api --output-dir output --year```
+```echo {2015..2020} | xargs -n 1 pfr-dl --output-dir output --year```
 
 Just be careful of potentially getting rate limited :)
