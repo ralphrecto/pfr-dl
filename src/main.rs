@@ -8,8 +8,8 @@ use hyper_tls::HttpsConnector;
 use structopt::StructOpt;
 use tokio::fs::create_dir_all;
 use tokio::fs::File;
-use tokio::io::AsyncWrite;
-use std::{error::Error, collections::{HashMap, HashSet, BTreeMap}, time::Duration, fmt, path::PathBuf};
+
+use std::{error::Error, collections::{HashMap, BTreeMap}, fmt};
 use scraper::{Html, Selector, Node, ElementRef};
 use regex::{Regex, Captures};
 use lazy_static::lazy_static;
@@ -19,7 +19,7 @@ lazy_static!{
     static ref GAME_ID_REGEX: Regex = Regex::new(r".*/(\w+)\.htm").unwrap();
     static ref WEEK_NUM_REGEX: Regex = Regex::new(r".*/(\d{4})/week_(\d{1,2})\.htm").unwrap();
 }
-const PFR_DOMAIN: &'static str = "https://www.pro-football-reference.com";
+const PFR_DOMAIN: &str = "https://www.pro-football-reference.com";
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
 enum StatsType {
@@ -99,7 +99,7 @@ fn parse_a_href(elt_ref: ElementRef) -> Uri {
     elt_ref.value()
         .attr("href")
         .and_then(|link| {
-            if link.starts_with("/") {
+            if link.starts_with('/') {
                 format!("{}{}", PFR_DOMAIN, link).parse().ok()
             } else {
                 link.parse().ok()
@@ -249,9 +249,9 @@ fn parse_season_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
 
 
 async fn fetch_uri(client: &Client<HttpsConnector<HttpConnector>>, uri: Uri) -> Result<String, Box<dyn Error + Send + Sync>>  {
-    let mut resp = client.get(uri).await?;
+    let resp = client.get(uri).await?;
 
-    let mut body = resp.into_body();
+    let body = resp.into_body();
     // NOTE response header says it is UTF-8 but UTF-8 parsing fails...
     // `file` claims the bytes are actually ISO-8859-1.
     // TODO find a valid way to convert to text
@@ -273,11 +273,11 @@ async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: 
     let year = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 1)).unwrap();
     let week_num = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 2)).unwrap();
 
-    let week_page_str = fetch_uri(&client, week_uri.clone()).await?;
+    let week_page_str = fetch_uri(client, week_uri.clone()).await?;
     let html_doc = Html::parse_document(&week_page_str);
 
     let game_log_links = parse_season_week_page(&html_doc);
-    let game_logs = join_all(game_log_links.iter().map(|uri| fetch_uri(&client, uri.clone()))).await;
+    let game_logs = join_all(game_log_links.iter().map(|uri| fetch_uri(client, uri.clone()))).await;
 
     let game_log_htmls: Vec<Html> = game_logs
         .into_iter()
@@ -294,9 +294,9 @@ async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: 
         .iter()
         .zip(game_log_htmls.iter())
         .map(|(game_log_uri, game_log_html)|
-            parse_game_log(&game_log_html)
+            parse_game_log(game_log_html)
                 .map(|game_stats| GameInfo { year, week_num, stats: game_stats })
-                .expect(&format!("Failed to parse game log at {}", game_log_uri))
+                .unwrap_or_else(|_| panic!("Failed to parse game log at {}", game_log_uri))
         ).collect();
 
     let all_typed_stats = game_infos.iter()
@@ -306,7 +306,7 @@ async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: 
     let mut stats_type_cols: HashMap<StatsType, Vec<&str>> = HashMap::new();
     for typed_stats in all_typed_stats {
         stats_type_cols.entry(typed_stats.stats_type)
-            .or_insert_with(|| typed_stats.stats.keys().map(|&s| s).collect());
+            .or_insert_with(|| typed_stats.stats.keys().copied().collect());
     }
 
     // Write output files
@@ -330,7 +330,7 @@ async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: 
         for player_stats in game_info.stats.player_stats {
             let TypedStats { stats_type, stats} = player_stats.typed_stats;
 
-            let mut stats_writer = stats_type_writer.get_mut(&stats_type).unwrap();
+            let stats_writer = stats_type_writer.get_mut(&stats_type).unwrap();
 
             let year: &str = &game_info.year.to_string();
             let week_num: &str = &game_info.week_num.to_string();
@@ -358,12 +358,12 @@ async fn process_year(client: &Client<HttpsConnector<HttpConnector>>, year: u32,
     println!("Fetching data for {}", year);
 
     let season_uri: Uri = format!("https://www.pro-football-reference.com/years/{}/", year).parse().unwrap();
-    let season_page_str = fetch_uri(&client, season_uri).await?.replace("\n<!--", "").replace("\n-->", "");
+    let season_page_str = fetch_uri(client, season_uri).await?.replace("\n<!--", "").replace("\n-->", "");
 
     let season_page_html = Html::parse_document(&season_page_str);
     let week_uris = parse_season_page(&season_page_html);
 
-    let process_week_futures = week_uris.iter().map(|week_uri| process_week(&client, week_uri, &output_dir));
+    let process_week_futures = week_uris.iter().map(|week_uri| process_week(client, week_uri, output_dir));
     let processed_weeks_res: Result<(), Box<dyn Error + Send + Sync>> = join_all(process_week_futures).await.into_iter().collect();
 
     processed_weeks_res?;
