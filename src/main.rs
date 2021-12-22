@@ -5,10 +5,14 @@ use hyper::{
     Client, client::HttpConnector
 };
 use hyper_tls::HttpsConnector;
-use std::{error::Error, collections::HashMap};
+use tokio::fs::create_dir_all;
+use tokio::fs::File;
+use tokio::io::AsyncWrite;
+use std::{error::Error, collections::{HashMap, HashSet, BTreeMap}, time::Duration, fmt};
 use scraper::{Html, Selector, Node, ElementRef};
 use regex::{Regex, Captures};
 use lazy_static::lazy_static;
+use csv_async::AsyncWriter;
 
 lazy_static!{
     static ref GAME_ID_REGEX: Regex = Regex::new(r".*/(\w+)\.htm").unwrap();
@@ -16,11 +20,30 @@ lazy_static!{
 }
 const PFR_DOMAIN: &'static str = "https://www.pro-football-reference.com";
 
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
+enum StatsType {
+    Offense,
+    Defense,
+    SpecialTeams
+}
+
+impl fmt::Display for StatsType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug)]
+struct TypedStats<'a> {
+    stats_type: StatsType,
+    stats: BTreeMap<&'a str, &'a str>
+}
+
 #[derive(Debug)]
 struct PlayerGameStats<'a> {
     player_id: &'a str,
     player_name: &'a str,
-    stats: HashMap<&'a str, &'a str>
+    typed_stats: TypedStats<'a>
 }
 
 #[derive(Debug)]
@@ -52,11 +75,11 @@ fn parse_a_href(elt_ref: ElementRef) -> Uri {
         }).unwrap()
 }
 
-fn parse_player_stats_table<'a>(uri: &Uri, html_doc: &'a Html, table_selector_str: &str) -> Result<Vec<PlayerGameStats<'a>>, String> {
+fn parse_player_stats_table<'a>(html_doc: &'a Html, table_selector_str: &str, stats_type: StatsType) -> Result<Vec<PlayerGameStats<'a>>, String> {
     let table_selector = selector(table_selector_str);
     let table_elt = match html_doc.select(&table_selector).next() {
         Some(elt) => elt,
-        None => return Err(format!("Game log at {}: no table element for selector '{}' found", uri, table_selector_str))
+        None => return Err(format!("no table element for selector '{}' found", table_selector_str))
     };
 
     let tbody_selector= selector("tbody");
@@ -65,7 +88,7 @@ fn parse_player_stats_table<'a>(uri: &Uri, html_doc: &'a Html, table_selector_st
     let mut retlist: Vec<PlayerGameStats> = vec![];
     'rowlabel: for table_row in table_body.children() {
 
-        let mut player_data: HashMap<&str, &str> = HashMap::new();
+        let mut player_data: BTreeMap<&str, &str> = BTreeMap::new();
 
         for table_data_noderef in table_row.children() {
             let table_data_elt = match table_data_noderef.value() {
@@ -116,7 +139,10 @@ fn parse_player_stats_table<'a>(uri: &Uri, html_doc: &'a Html, table_selector_st
                 retlist.push(PlayerGameStats {
                     player_id,
                     player_name,
-                    stats: player_data
+                    typed_stats: TypedStats {
+                        stats_type,
+                        stats: player_data
+                    }
                 });
             },
             _ => ()
@@ -126,7 +152,7 @@ fn parse_player_stats_table<'a>(uri: &Uri, html_doc: &'a Html, table_selector_st
     Ok(retlist)
 }
 
-fn parse_game_log<'a>(game_log_uri: &Uri, game_log_html: &'a Html) -> Result<GameStats<'a>, String> {
+fn parse_game_log<'a>(game_log_html: &'a Html) -> Result<GameStats<'a>, String> {
     let mut player_stats: Vec<PlayerGameStats> = vec![];
 
     let game_link_selector = selector("link[rel=canonical]");
@@ -134,16 +160,16 @@ fn parse_game_log<'a>(game_log_uri: &Uri, game_log_html: &'a Html) -> Result<Gam
     let game_id = GAME_ID_REGEX.captures(game_link).unwrap().get(1).unwrap().as_str();
 
     // Mandatory stats.
-    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#player_offense")?);
-    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#player_defense")?);
-    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#returns")?);
-    player_stats.extend(parse_player_stats_table(game_log_uri, game_log_html, "#kicking")?);
+    player_stats.extend(parse_player_stats_table(game_log_html, "#player_offense", StatsType::Offense)?);
+    player_stats.extend(parse_player_stats_table(game_log_html, "#player_defense", StatsType::Defense)?);
+    player_stats.extend(parse_player_stats_table(game_log_html, "#returns", StatsType::SpecialTeams)?);
+    player_stats.extend(parse_player_stats_table(game_log_html, "#kicking", StatsType::SpecialTeams)?);
 
     // Optional advanced stats.
-    let adv_passing = parse_player_stats_table(game_log_uri, game_log_html, "#passing_advanced");
-    let adv_rushing = parse_player_stats_table(game_log_uri, game_log_html, "#rushing_advanced");
-    let adv_receiving = parse_player_stats_table(game_log_uri, game_log_html, "#receiving_advanced");
-    let adv_def = parse_player_stats_table(game_log_uri, game_log_html, "#defense_advanced");
+    let adv_passing = parse_player_stats_table(game_log_html, "#passing_advanced", StatsType::Offense);
+    let adv_rushing = parse_player_stats_table( game_log_html, "#rushing_advanced", StatsType::Offense);
+    let adv_receiving = parse_player_stats_table(game_log_html, "#receiving_advanced", StatsType::Offense);
+    let adv_def = parse_player_stats_table(game_log_html, "#defense_advanced", StatsType::Defense);
 
     for adv_stats in [adv_passing, adv_rushing, adv_receiving, adv_def] {
         match adv_stats {
@@ -183,7 +209,6 @@ fn parse_season_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
 
 async fn fetch_uri(client: &Client<HttpsConnector<HttpConnector>>, uri: Uri) -> Result<String, Box<dyn Error + Send + Sync>>  {
     let mut resp = client.get(uri).await?;
-    // println!("Resp status: {}", resp.status());
 
     let mut body = resp.into_body();
     // NOTE response header says it is UTF-8 but UTF-8 parsing fails...
@@ -195,13 +220,13 @@ async fn fetch_uri(client: &Client<HttpsConnector<HttpConnector>>, uri: Uri) -> 
     Ok(s)
 }
 
-fn parse_u8_capture(capture: &Captures, i: usize) -> Option<u32> {
+fn parse_u32_capture(capture: &Captures, i: usize) -> Option<u32> {
     capture.get(i)
         .map(|m| m.as_str())
         .and_then(|s| s.parse::<u32>().ok())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
@@ -211,14 +236,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let season_page_html = Html::parse_document(&season_page_str);
     let week_uris = parse_season_page(&season_page_html);
+    let base_output_dir = "output";
 
     for week_uri in &week_uris[..2] {
         println!("Processing uri {}", week_uri);
 
         let week_uri_str = week_uri.to_string();
 
-        let year = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u8_capture(&c, 1)).unwrap();
-        let week_num = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u8_capture(&c, 2)).unwrap();
+        let year = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 1)).unwrap();
+        let week_num = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 2)).unwrap();
 
         let week_page_str = fetch_uri(&client, week_uri.clone()).await?;
         let html_doc = Html::parse_document(&week_page_str);
@@ -241,10 +267,62 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             .iter()
             .zip(game_log_htmls.iter())
             .map(|(game_log_uri, game_log_html)|
-                parse_game_log( game_log_uri, &game_log_html)
+                parse_game_log(&game_log_html)
                     .map(|game_stats| GameInfo { year, week_num, stats: game_stats })
-                    .unwrap()
+                    .expect(&format!("Failed to parse game log at {}", game_log_uri))
             ).collect();
+
+        let all_typed_stats = game_infos.iter()
+            .flat_map(|game_info| game_info.stats.player_stats.iter())
+            .map(|player_game_stats| &player_game_stats.typed_stats);
+
+        let mut stats_type_cols: HashMap<StatsType, Vec<&str>> = HashMap::new();
+        for typed_stats in all_typed_stats {
+            stats_type_cols.entry(typed_stats.stats_type)
+                .or_insert_with(|| typed_stats.stats.keys().map(|&s| s).collect());
+        }
+
+        // Write output files
+        let dir_name = format!("{}/{}/{}", base_output_dir, year, week_num);
+        create_dir_all(&dir_name).await;
+
+        let mut stats_type_writer: HashMap<StatsType, AsyncWriter<File>> = HashMap::new();
+        for (stats_type, cols) in stats_type_cols.iter() {
+            let stats_type_f = File::create(format!("{}/{}", &dir_name, stats_type)).await?;
+
+            let mut all_cols = vec!["year", "week", "game_id"];
+            all_cols.extend(cols);
+
+            let mut csv_writer = AsyncWriter::from_writer(stats_type_f);
+            csv_writer.write_record(all_cols).await?;
+
+            stats_type_writer.insert(*stats_type, csv_writer);
+        }
+
+        for game_info in game_infos {
+            for player_stats in game_info.stats.player_stats {
+                let TypedStats { stats_type, stats} = player_stats.typed_stats;
+
+                let mut stats_writer = stats_type_writer.get_mut(&stats_type).unwrap();
+
+                let year: &str = &game_info.year.to_string();
+                let week_num: &str = &game_info.week_num.to_string();
+                let game_id: &str = game_info.stats.game_id;
+
+                let mut vals: Vec<&str> = vec![year, week_num, game_id];
+                for &col in stats_type_cols.get(&stats_type).unwrap() {
+                    let stat_val = match stats.get(col) {
+                        Some(&s) => s,
+                        None => ""
+                    };
+
+                    vals.push(stat_val);
+                }
+
+                stats_writer.write_record(vals).await?;
+            }
+        }
+        
     }
 
     Ok(())
