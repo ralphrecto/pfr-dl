@@ -159,7 +159,7 @@ fn parse_player_stats_table<'a>(html_doc: &'a Html, table_selector_str: &str, st
 
             match data_val_elt {
                 Some(Node::Text(t)) => {
-                    player_data.insert(stat_name, t.text.as_ref());
+                    player_data.insert(stat_name.trim(), t.text.as_ref().trim());
                 },
                 _ => ()
             };
