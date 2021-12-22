@@ -252,6 +252,93 @@ fn parse_u32_capture(capture: &Captures, i: usize) -> Option<u32> {
         .and_then(|s| s.parse::<u32>().ok())
 }
 
+async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: &Uri, base_output_dir: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let week_uri_str = week_uri.to_string();
+
+    let year = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 1)).unwrap();
+    let week_num = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 2)).unwrap();
+
+    let week_page_str = fetch_uri(&client, week_uri.clone()).await?;
+    let html_doc = Html::parse_document(&week_page_str);
+
+    let game_log_links = parse_season_week_page(&html_doc);
+    let game_logs = join_all(game_log_links.iter().map(|uri| fetch_uri(&client, uri.clone()))).await;
+
+    let game_log_htmls: Vec<Html> = game_logs
+        .into_iter()
+        .map(|game_log_res| {
+            let game_log_html_str = game_log_res.unwrap();
+
+            // TODO a lot of the stats tables below are commented!
+            // find a better way to uncomment them
+            let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
+            Html::parse_document(&s_prime)
+        }).collect();
+
+    let game_infos: Vec<GameInfo> = game_log_links
+        .iter()
+        .zip(game_log_htmls.iter())
+        .map(|(game_log_uri, game_log_html)|
+            parse_game_log(&game_log_html)
+                .map(|game_stats| GameInfo { year, week_num, stats: game_stats })
+                .expect(&format!("Failed to parse game log at {}", game_log_uri))
+        ).collect();
+
+    let all_typed_stats = game_infos.iter()
+        .flat_map(|game_info| game_info.stats.player_stats.iter())
+        .map(|player_game_stats| &player_game_stats.typed_stats);
+
+    let mut stats_type_cols: HashMap<StatsType, Vec<&str>> = HashMap::new();
+    for typed_stats in all_typed_stats {
+        stats_type_cols.entry(typed_stats.stats_type)
+            .or_insert_with(|| typed_stats.stats.keys().map(|&s| s).collect());
+    }
+
+    // Write output files
+    let dir_name = format!("{}/{}/{}", base_output_dir, year, week_num);
+    create_dir_all(&dir_name).await;
+
+    let mut stats_type_writer: HashMap<StatsType, AsyncWriter<File>> = HashMap::new();
+    for (stats_type, cols) in stats_type_cols.iter() {
+        let stats_type_f = File::create(format!("{}/{}", &dir_name, stats_type)).await?;
+
+        let mut all_cols = vec!["year", "week", "game_id"];
+        all_cols.extend(cols);
+
+        let mut csv_writer = AsyncWriter::from_writer(stats_type_f);
+        csv_writer.write_record(all_cols).await?;
+
+        stats_type_writer.insert(*stats_type, csv_writer);
+    }
+
+    for game_info in game_infos {
+        for player_stats in game_info.stats.player_stats {
+            let TypedStats { stats_type, stats} = player_stats.typed_stats;
+
+            let mut stats_writer = stats_type_writer.get_mut(&stats_type).unwrap();
+
+            let year: &str = &game_info.year.to_string();
+            let week_num: &str = &game_info.week_num.to_string();
+            let game_id: &str = game_info.stats.game_id;
+
+            let mut vals: Vec<&str> = vec![year, week_num, game_id];
+            for &col in stats_type_cols.get(&stats_type).unwrap() {
+                let stat_val = match stats.get(col) {
+                    Some(&s) => s,
+                    None => ""
+                };
+
+                vals.push(stat_val);
+            }
+
+            stats_writer.write_record(vals).await?;
+        }
+    }
+    
+    println!("Finished processing {} week {}", year, week_num);
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let https = HttpsConnector::new();
@@ -264,92 +351,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let week_uris = parse_season_page(&season_page_html);
     let base_output_dir = "output";
 
-    for week_uri in week_uris {
-        println!("Processing uri {}", week_uri);
+    let process_week_futures = week_uris.iter().map(|week_uri| process_week(&client, week_uri, base_output_dir));
+    let processed_weeks_res: Result<(), Box<dyn Error + Send + Sync>> = join_all(process_week_futures).await.into_iter().collect();
 
-        let week_uri_str = week_uri.to_string();
-
-        let year = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 1)).unwrap();
-        let week_num = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 2)).unwrap();
-
-        let week_page_str = fetch_uri(&client, week_uri.clone()).await?;
-        let html_doc = Html::parse_document(&week_page_str);
-
-        let game_log_links = parse_season_week_page(&html_doc);
-        let game_logs = join_all(game_log_links.iter().map(|uri| fetch_uri(&client, uri.clone()))).await;
-
-        let game_log_htmls: Vec<Html> = game_logs
-            .into_iter()
-            .map(|game_log_res| {
-                let game_log_html_str = game_log_res.unwrap();
-
-                // TODO a lot of the stats tables below are commented!
-                // find a better way to uncomment them
-                let s_prime = game_log_html_str.replace("\n<!--", "").replace("\n-->", "");
-                Html::parse_document(&s_prime)
-            }).collect();
-
-        let game_infos: Vec<GameInfo> = game_log_links
-            .iter()
-            .zip(game_log_htmls.iter())
-            .map(|(game_log_uri, game_log_html)|
-                parse_game_log(&game_log_html)
-                    .map(|game_stats| GameInfo { year, week_num, stats: game_stats })
-                    .expect(&format!("Failed to parse game log at {}", game_log_uri))
-            ).collect();
-
-        let all_typed_stats = game_infos.iter()
-            .flat_map(|game_info| game_info.stats.player_stats.iter())
-            .map(|player_game_stats| &player_game_stats.typed_stats);
-
-        let mut stats_type_cols: HashMap<StatsType, Vec<&str>> = HashMap::new();
-        for typed_stats in all_typed_stats {
-            stats_type_cols.entry(typed_stats.stats_type)
-                .or_insert_with(|| typed_stats.stats.keys().map(|&s| s).collect());
-        }
-
-        // Write output files
-        let dir_name = format!("{}/{}/{}", base_output_dir, year, week_num);
-        create_dir_all(&dir_name).await;
-
-        let mut stats_type_writer: HashMap<StatsType, AsyncWriter<File>> = HashMap::new();
-        for (stats_type, cols) in stats_type_cols.iter() {
-            let stats_type_f = File::create(format!("{}/{}", &dir_name, stats_type)).await?;
-
-            let mut all_cols = vec!["year", "week", "game_id"];
-            all_cols.extend(cols);
-
-            let mut csv_writer = AsyncWriter::from_writer(stats_type_f);
-            csv_writer.write_record(all_cols).await?;
-
-            stats_type_writer.insert(*stats_type, csv_writer);
-        }
-
-        for game_info in game_infos {
-            for player_stats in game_info.stats.player_stats {
-                let TypedStats { stats_type, stats} = player_stats.typed_stats;
-
-                let mut stats_writer = stats_type_writer.get_mut(&stats_type).unwrap();
-
-                let year: &str = &game_info.year.to_string();
-                let week_num: &str = &game_info.week_num.to_string();
-                let game_id: &str = game_info.stats.game_id;
-
-                let mut vals: Vec<&str> = vec![year, week_num, game_id];
-                for &col in stats_type_cols.get(&stats_type).unwrap() {
-                    let stat_val = match stats.get(col) {
-                        Some(&s) => s,
-                        None => ""
-                    };
-
-                    vals.push(stat_val);
-                }
-
-                stats_writer.write_record(vals).await?;
-            }
-        }
-        
-    }
+    processed_weeks_res?;
 
     Ok(())
 }
