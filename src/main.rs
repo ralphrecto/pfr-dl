@@ -24,7 +24,12 @@ const PFR_DOMAIN: &'static str = "https://www.pro-football-reference.com";
 enum StatsType {
     Offense,
     Defense,
-    SpecialTeams
+    Returns,
+    Kicking,
+    AdvPassing,
+    AdvRushing,
+    AdvReceiving,
+    AdvDefense
 }
 
 impl fmt::Display for StatsType {
@@ -188,14 +193,14 @@ fn parse_game_log<'a>(game_log_html: &'a Html) -> Result<GameStats<'a>, String> 
     // Mandatory stats.
     player_stats.extend(parse_player_stats_table(game_log_html, "#player_offense", StatsType::Offense)?);
     player_stats.extend(parse_player_stats_table(game_log_html, "#player_defense", StatsType::Defense)?);
-    player_stats.extend(parse_player_stats_table(game_log_html, "#returns", StatsType::SpecialTeams)?);
-    player_stats.extend(parse_player_stats_table(game_log_html, "#kicking", StatsType::SpecialTeams)?);
+    player_stats.extend(parse_player_stats_table(game_log_html, "#returns", StatsType::Returns)?);
+    player_stats.extend(parse_player_stats_table(game_log_html, "#kicking", StatsType::Kicking)?);
 
     // Optional advanced stats.
-    let adv_passing = parse_player_stats_table(game_log_html, "#passing_advanced", StatsType::Offense);
-    let adv_rushing = parse_player_stats_table( game_log_html, "#rushing_advanced", StatsType::Offense);
-    let adv_receiving = parse_player_stats_table(game_log_html, "#receiving_advanced", StatsType::Offense);
-    let adv_def = parse_player_stats_table(game_log_html, "#defense_advanced", StatsType::Defense);
+    let adv_passing = parse_player_stats_table(game_log_html, "#passing_advanced", StatsType::AdvPassing);
+    let adv_rushing = parse_player_stats_table( game_log_html, "#rushing_advanced", StatsType::AdvRushing);
+    let adv_receiving = parse_player_stats_table(game_log_html, "#receiving_advanced", StatsType::AdvReceiving);
+    let adv_def = parse_player_stats_table(game_log_html, "#defense_advanced", StatsType::AdvDefense);
 
     for adv_stats in [adv_passing, adv_rushing, adv_receiving, adv_def] {
         match adv_stats {
@@ -212,7 +217,16 @@ fn parse_game_log<'a>(game_log_html: &'a Html) -> Result<GameStats<'a>, String> 
 fn parse_season_week_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
     season_week_log_html
         .select(&selector(".gamelink a"))
-        .map(parse_a_href)
+        .filter(|elt_ref| {
+            let text_opt = elt_ref
+                .first_child()
+                .map(|noderef| match noderef.value() {
+                    Node::Text(t) => t.to_string() == "F",
+                    _ => false
+                });
+
+            text_opt.unwrap_or(false)
+        }).map(parse_a_href)
         .collect()
 }
 
@@ -344,7 +358,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
 
-    let season_uri: Uri = "https://www.pro-football-reference.com/years/2019/".parse().unwrap();
+    let season_uri: Uri = "https://www.pro-football-reference.com/years/2021/".parse().unwrap();
     let season_page_str = fetch_uri(&client, season_uri).await?.replace("\n<!--", "").replace("\n-->", "");
 
     let season_page_html = Html::parse_document(&season_page_str);
