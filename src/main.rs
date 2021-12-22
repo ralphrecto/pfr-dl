@@ -16,7 +16,7 @@ use csv_async::AsyncWriter;
 
 lazy_static!{
     static ref GAME_ID_REGEX: Regex = Regex::new(r".*/(\w+)\.htm").unwrap();
-    static ref WEEK_NUM_REGEX: Regex = Regex::new(r".*/(\d{4})/week_(\d)+\.htm").unwrap();
+    static ref WEEK_NUM_REGEX: Regex = Regex::new(r".*/(\d{4})/week_(\d{1,2})\.htm").unwrap();
 }
 const PFR_DOMAIN: &'static str = "https://www.pro-football-reference.com";
 
@@ -57,6 +57,32 @@ struct GameInfo<'a> {
     year: u32,
     week_num: u32,
     stats: GameStats<'a>
+}
+
+fn parse_year(week_uri: &str) -> u32 {
+    WEEK_NUM_REGEX.captures(week_uri).and_then(|c| parse_u32_capture(&c, 1)).unwrap()
+}
+
+#[test]
+fn parse_year_test() {
+    assert_eq!(2021, parse_year("https://www.pro-football-reference.com/years/2021/week_1.htm"));
+    assert_eq!(2021, parse_year("https://www.pro-football-reference.com/years/2021/week_10.htm"));
+    assert_eq!(2021, parse_year("https://www.pro-football-reference.com/years/2021/week_17.htm"));
+
+    assert_eq!(2019, parse_year("https://www.pro-football-reference.com/years/2019/week_1.htm"));
+    assert_eq!(2019, parse_year("https://www.pro-football-reference.com/years/2019/week_10.htm"));
+    assert_eq!(2019, parse_year("https://www.pro-football-reference.com/years/2019/week_17.htm"));
+}
+
+fn parse_week_num(week_uri: &str) -> u32 {
+    WEEK_NUM_REGEX.captures(week_uri).and_then(|c| parse_u32_capture(&c, 2)).unwrap()
+}
+
+#[test]
+fn parse_week_num_test() {
+    assert_eq!(1, parse_week_num("https://www.pro-football-reference.com/years/2021/week_1.htm"));
+    assert_eq!(10, parse_week_num("https://www.pro-football-reference.com/years/2021/week_10.htm"));
+    assert_eq!(17, parse_week_num("https://www.pro-football-reference.com/years/2021/week_17.htm"));
 }
 
 fn selector(selector_str: &str) -> Selector {
@@ -238,7 +264,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let week_uris = parse_season_page(&season_page_html);
     let base_output_dir = "output";
 
-    for week_uri in &week_uris[..2] {
+    for week_uri in week_uris {
         println!("Processing uri {}", week_uri);
 
         let week_uri_str = week_uri.to_string();
