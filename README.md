@@ -25,7 +25,7 @@ output
 │   │   └── Returns
 ...
 ```
-Each file is a CSV corresponding to a player stats table in a pro-football-reference game log page (e.g. like this [one](https://www.pro-football-reference.com/boxscores/202109120buf.htm)).
+Within the output directory, there will be a directory for the year. Within a year directory, there will be 1 directory per regular season week for that year. Within each week directory will be a collection of CSV files with all of the stats for that week's games for each dimension of the game (Offense, Defense, etc.) Each CSV file corresponds to a player stats table in a pro-football-reference game log page (e.g. like this [one](https://www.pro-football-reference.com/boxscores/202109120buf.htm)).
 
 If you want to download multiple years at once, you can use this snippet:
 
