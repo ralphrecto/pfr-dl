@@ -130,12 +130,9 @@ fn parse_player_stats_table<'a>(html_doc: &'a Html, table_selector_str: &str, st
 
             // Handle player id.
 
-            match table_data_elt.attr("data-append-csv") {
-                Some(id) => {
-                    player_data.insert("player_id", id);
-                },
-                None => ()
-            };
+            if let Some(id) = table_data_elt.attr("data-append-csv") {
+                player_data.insert("player_id", id);
+            }
 
             // Handle stat.
 
@@ -158,33 +155,27 @@ fn parse_player_stats_table<'a>(html_doc: &'a Html, table_selector_str: &str, st
                     .map(|v| v.value())
             };
 
-            match data_val_elt {
-                Some(Node::Text(t)) => {
-                    player_data.insert(stat_name.trim(), t.text.as_ref().trim());
-                },
-                _ => ()
-            };
+            if let Some(Node::Text(t)) = data_val_elt {
+                player_data.insert(stat_name.trim(), t.text.as_ref().trim());
+            }
         }
 
-        match (player_data.get("player_id"), player_data.get("player")) {
-            (Some(&player_id), Some(&player_name)) => {
-                retlist.push(PlayerGameStats {
-                    player_id,
-                    player_name,
-                    typed_stats: TypedStats {
-                        stats_type,
-                        stats: player_data
-                    }
-                });
-            },
-            _ => ()
+        if let (Some(&player_id), Some(&player_name)) = (player_data.get("player_id"), player_data.get("player")) {
+            retlist.push(PlayerGameStats {
+                player_id,
+                player_name,
+                typed_stats: TypedStats {
+                    stats_type,
+                    stats: player_data
+                }
+            });
         }
     }
 
     Ok(retlist)
 }
 
-fn parse_game_log<'a>(game_log_html: &'a Html) -> Result<GameStats<'a>, String> {
+fn parse_game_log(game_log_html: &Html) -> Result<GameStats, String> {
     let mut player_stats: Vec<PlayerGameStats> = vec![];
 
     let game_link_selector = selector("link[rel=canonical]");
@@ -204,18 +195,15 @@ fn parse_game_log<'a>(game_log_html: &'a Html) -> Result<GameStats<'a>, String> 
     let adv_def = parse_player_stats_table(game_log_html, "#defense_advanced", StatsType::AdvDefense);
 
     for adv_stats in [adv_passing, adv_rushing, adv_receiving, adv_def] {
-        match adv_stats {
-            Ok(stats) => {
-                player_stats.extend(stats);
-            }
-            Err(_) => ()
+        if let Ok(stats) = adv_stats {
+            player_stats.extend(stats);
         }
     }
 
     Ok(GameStats { game_id, player_stats })
 }
 
-fn parse_season_week_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
+fn parse_season_week_page(season_week_log_html: & Html) -> Vec<Uri> {
     season_week_log_html
         .select(&selector(".gamelink a"))
         .filter(|elt_ref| {
@@ -231,7 +219,7 @@ fn parse_season_week_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
         .collect()
 }
 
-fn parse_season_page<'a>(season_week_log_html: &'a Html) -> Vec<Uri> {
+fn parse_season_page(season_week_log_html: &Html) -> Vec<Uri> {
     season_week_log_html
         .select(&selector("#div_week_games a"))
         .filter(|elt_ref| {
@@ -270,8 +258,8 @@ fn parse_u32_capture(capture: &Captures, i: usize) -> Option<u32> {
 async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: &Uri, base_output_dir: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let week_uri_str = week_uri.to_string();
 
-    let year = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 1)).unwrap();
-    let week_num = WEEK_NUM_REGEX.captures(&week_uri_str).and_then(|c| parse_u32_capture(&c, 2)).unwrap();
+    let year = parse_year(&week_uri_str);
+    let week_num = parse_week_num(&week_uri_str);
 
     let week_page_str = fetch_uri(client, week_uri.clone()).await?;
     let html_doc = Html::parse_document(&week_page_str);
@@ -311,7 +299,7 @@ async fn process_week(client: &Client<HttpsConnector<HttpConnector>>, week_uri: 
 
     // Write output files
     let dir_name = format!("{}/{}/{}", base_output_dir, year, week_num);
-    create_dir_all(&dir_name).await;
+    create_dir_all(&dir_name).await?;
 
     let mut stats_type_writer: HashMap<StatsType, AsyncWriter<File>> = HashMap::new();
     for (stats_type, cols) in stats_type_cols.iter() {
